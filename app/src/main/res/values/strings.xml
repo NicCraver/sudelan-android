@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">速删</string>
+    <string name="permission_rationale">需要访问照片权限才能帮您整理照片</string>
+    <string name="permission_denied">没有照片权限无法使用</string>
+    <string name="no_photos">暂无照片</string>
+    <string name="loading">加载中...</string>
+    <string name="deleted_today">今日已删 %d</string>
+    <string name="swipe_up_next">向上滑动：下一张</string>
+    <string name="swipe_side_delete">左右滑动：删除</string>
+</resources>
