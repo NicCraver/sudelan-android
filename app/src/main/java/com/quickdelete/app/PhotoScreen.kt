@@ -3,28 +3,53 @@ package com.quickdelete.app
 import android.Manifest
 import android.app.Activity
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import android.provider.Settings
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material.icons.filled.SwipeVertical
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -35,6 +60,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -63,6 +89,10 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+private val BarBg = Color(0xFF121212)
+private val Accent = Color(0xFFE53935)
+private val AccentBlue = Color(0xFF1E88E5)
+
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun PhotoScreen(
@@ -78,16 +108,14 @@ fun PhotoScreen(
 
     val permissionState = rememberPermissionState(permission)
 
-    // Batch delete confirmation (Android 11+): one dialog for the whole pending set
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            viewModel.onBatchDeleteConfirmed()
-            // Recompute feed vs seen set after MediaStore delete.
+            viewModel.onEmptyRecycleConfirmed()
             viewModel.loadPhotos(context)
         } else {
-            viewModel.onBatchDeleteCancelled()
+            viewModel.onEmptyRecycleCancelled()
         }
     }
 
@@ -120,19 +148,110 @@ fun PhotoScreen(
                 LoadingScreen()
             }
 
-            viewModel.photos.isEmpty() && viewModel.pendingCount == 0 -> {
-                EmptyScreen(
-                    allPhotosSeen = viewModel.allPhotosSeen,
-                    onRebrowse = { viewModel.clearSeenAndReload(context) }
-                )
-            }
-
             else -> {
-                PhotoSwipeScreen(
-                    viewModel = viewModel,
-                    deleteRequestLauncher = deleteRequestLauncher
-                )
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                        when (viewModel.selectedTab) {
+                            AppTab.Swipe -> SwipeTabContent(viewModel)
+                            AppTab.Album -> AlbumTab(
+                                viewModel = viewModel
+                            )
+                            AppTab.Recycle -> RecycleTab(
+                                viewModel = viewModel,
+                                onEmpty = {
+                                    viewModel.requestEmptyRecycleBin(context, deleteRequestLauncher)
+                                }
+                            )
+                            AppTab.Me -> MeTab(viewModel = viewModel)
+                        }
+                    }
+                    SudelanBottomBar(
+                        selected = viewModel.selectedTab,
+                        recycleCount = viewModel.recycleCount,
+                        onSelect = { viewModel.selectTab(it) }
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun SudelanBottomBar(
+    selected: AppTab,
+    recycleCount: Int,
+    onSelect: (AppTab) -> Unit
+) {
+    val items = listOf(
+        Triple(AppTab.Swipe, "刷删", Icons.Filled.SwipeVertical),
+        Triple(AppTab.Album, "相册", Icons.Filled.GridView),
+        Triple(AppTab.Recycle, "回收站", Icons.Filled.Delete),
+        Triple(AppTab.Me, "我的", Icons.Filled.Person)
+    )
+    NavigationBar(
+        containerColor = BarBg,
+        contentColor = Color.White,
+        modifier = Modifier.navigationBarsPadding()
+    ) {
+        items.forEach { (tab, label, icon) ->
+            val isSelected = selected == tab
+            NavigationBarItem(
+                selected = isSelected,
+                onClick = { onSelect(tab) },
+                icon = {
+                    Box {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        if (tab == AppTab.Recycle && recycleCount > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = 6.dp, y = (-4).dp)
+                                    .size(8.dp)
+                                    .background(Accent, CircleShape)
+                            )
+                        }
+                    }
+                },
+                label = {
+                    Text(
+                        text = if (tab == AppTab.Recycle && recycleCount > 0) {
+                            "$label($recycleCount)"
+                        } else label,
+                        fontSize = 11.sp
+                    )
+                },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color.White,
+                    selectedTextColor = Color.White,
+                    unselectedIconColor = Color.White.copy(alpha = 0.55f),
+                    unselectedTextColor = Color.White.copy(alpha = 0.55f),
+                    indicatorColor = Color(0xFF2A2A2A)
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun SwipeTabContent(viewModel: PhotoViewModel) {
+    val context = LocalContext.current
+    when {
+        viewModel.photos.isEmpty() -> {
+            EmptyScreen(
+                allPhotosSeen = viewModel.allPhotosSeen,
+                onRebrowse = { viewModel.clearSeenAndReload(context) }
+            )
+        }
+        else -> {
+            PhotoSwipeScreen(viewModel = viewModel)
         }
     }
 }
@@ -214,7 +333,7 @@ fun EmptyScreen(
                     onClick = { onRebrowse?.invoke() },
                     modifier = Modifier.padding(top = 20.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF1E88E5),
+                        containerColor = AccentBlue,
                         contentColor = Color.White
                     )
                 ) {
@@ -225,6 +344,339 @@ fun EmptyScreen(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Album tab
+// ---------------------------------------------------------------------------
+
+@Composable
+fun AlbumTab(viewModel: PhotoViewModel) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "相册 (${viewModel.albumPhotos.size})",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Row {
+                if (viewModel.albumSelectMode && viewModel.albumSelectedIds.isNotEmpty()) {
+                    TextButton(onClick = { viewModel.softDeleteAlbumSelection() }) {
+                        Text("移入回收站 (${viewModel.albumSelectedIds.size})", color = Accent)
+                    }
+                }
+                TextButton(onClick = { viewModel.toggleAlbumSelectMode() }) {
+                    Text(
+                        text = if (viewModel.albumSelectMode) "取消" else "选择",
+                        color = Color.White
+                    )
+                }
+            }
+        }
+
+        if (viewModel.albumPhotos.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无照片", color = Color.White.copy(alpha = 0.7f))
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(viewModel.albumPhotos, key = { it.id }) { photo ->
+                    val selected = photo.id in viewModel.albumSelectedIds
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .clickable {
+                                if (viewModel.albumSelectMode) {
+                                    viewModel.toggleAlbumSelection(photo.id)
+                                } else {
+                                    viewModel.jumpToPhotoFromAlbum(photo.id)
+                                }
+                            }
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(photo.uri)
+                                .crossfade(true)
+                                .size(400)
+                                .build(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (viewModel.albumSelectMode) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(6.dp)
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (selected) AccentBlue else Color.Black.copy(alpha = 0.45f)
+                                    )
+                                    .border(1.dp, Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (selected) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recycle tab
+// ---------------------------------------------------------------------------
+
+@Composable
+fun RecycleTab(
+    viewModel: PhotoViewModel,
+    onEmpty: () -> Unit
+) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(
+                    text = "回收站 (${viewModel.recycleCount})",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (viewModel.recycleCount > 0) {
+                    Text(
+                        text = "约 ${viewModel.formatBytes(viewModel.recycleBinBytes())}",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            if (viewModel.recycleCount > 0) {
+                Button(
+                    onClick = onEmpty,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Accent,
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text("清空", fontSize = 14.sp)
+                }
+            }
+        }
+
+        if (viewModel.recyclePhotos.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Filled.RestoreFromTrash,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.4f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("回收站为空", color = Color.White.copy(alpha = 0.7f))
+                    Text(
+                        "右滑或相册多选会移到这里",
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(viewModel.recyclePhotos, key = { it.id }) { photo ->
+                    Box(
+                        modifier = Modifier.aspectRatio(1f)
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(photo.uri)
+                                .crossfade(true)
+                                .size(400)
+                                .build(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        TextButton(
+                            onClick = { viewModel.restoreFromRecycle(photo) },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(4.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                "恢复",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Me tab
+// ---------------------------------------------------------------------------
+
+@Composable
+fun MeTab(viewModel: PhotoViewModel) {
+    val context = LocalContext.current
+    val versionName = remember {
+        try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0.2.0"
+        } catch (_: Throwable) {
+            "0.2.0"
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 20.dp)
+    ) {
+        Text(
+            text = "我的",
+            color = Color.White,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 16.dp, bottom = 20.dp)
+        )
+
+        StatCard(
+            title = "今日移入回收站",
+            value = "${viewModel.softDeletedToday}"
+        )
+        Spacer(Modifier.height(10.dp))
+        StatCard(
+            title = "今日永久删除",
+            value = "${viewModel.deletedToday}"
+        )
+        Spacer(Modifier.height(10.dp))
+        StatCard(
+            title = "累计永久删除",
+            value = "${viewModel.deletedTotal}"
+        )
+        Spacer(Modifier.height(10.dp))
+        StatCard(
+            title = "约释放空间",
+            value = viewModel.formatBytes(viewModel.bytesFreed)
+        )
+        Spacer(Modifier.height(10.dp))
+        StatCard(
+            title = "回收站待处理",
+            value = "${viewModel.recycleCount}"
+        )
+
+        Spacer(Modifier.height(28.dp))
+
+        Button(
+            onClick = { viewModel.clearSeenAndReload(context) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = AccentBlue,
+                contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text("重新浏览", fontSize = 16.sp, modifier = Modifier.padding(vertical = 4.dp))
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("速删", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                text = "版本 $versionName",
+                color = Color.White.copy(alpha = 0.5f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            Text(
+                text = "右滑进回收站 · 清空才永久删除",
+                color = Color.White.copy(alpha = 0.4f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatCard(title: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1A1A1A), RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, color = Color.White.copy(alpha = 0.75f), fontSize = 15.sp)
+        Text(value, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Swipe gestures — FROZEN from v0.1.4 (axis lock + velocity throw)
+// Soft-delete only: stageCurrentForDelete → recycle bin (no MediaStore).
+// ---------------------------------------------------------------------------
 
 private enum class AxisLock {
     None,
@@ -235,8 +687,7 @@ private enum class AxisLock {
 
 @Composable
 fun PhotoSwipeScreen(
-    viewModel: PhotoViewModel,
-    deleteRequestLauncher: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.IntentSenderRequest>
+    viewModel: PhotoViewModel
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -247,15 +698,11 @@ fun PhotoSwipeScreen(
     val scale = remember { Animatable(1f) }
     val rotation = remember { Animatable(0f) }
     val alpha = remember { Animatable(1f) }
-    // Only lock during irreversible stage transitions (delete / vertical nav exit),
-    // never during snap-back — so a new drag can interrupt and retarget.
     var gestureLocked by remember { mutableStateOf(false) }
-    // Axis lock: prevents diagonal up-swipes from accidentally deleting.
     var axisLock by remember { mutableStateOf(AxisLock.None) }
     var gestureDx by remember { mutableStateOf(0f) }
     var gestureDy by remember { mutableStateOf(0f) }
     val velocityTracker = remember { VelocityTracker() }
-    // ~14dp lock slop — decide axis once finger travels past this.
     val lockSlopPx = with(density) { 14.dp.toPx() }
     val crossAxisDamp = 0.08f
 
@@ -273,7 +720,7 @@ fun PhotoSwipeScreen(
 
     val snapSpring = remember {
         spring<Float>(
-            dampingRatio = 1f, // critically damped — no bounce on cancel
+            dampingRatio = 1f,
             stiffness = Spring.StiffnessMedium
         )
     }
@@ -287,7 +734,6 @@ fun PhotoSwipeScreen(
     val currentPhoto = viewModel.getCurrentPhoto()
     val nextPhoto = viewModel.getNextPhoto()
 
-    // Preload next image
     if (nextPhoto != null) {
         DisposableEffect(nextPhoto.uri) {
             val imageLoader = ImageLoader(context)
@@ -356,7 +802,6 @@ fun PhotoSwipeScreen(
                                 axisLock = AxisLock.None
                                 gestureDx = 0f
                                 gestureDy = 0f
-                                // Interrupt snap-back / soft anims and take over from current values
                                 scope.launch {
                                     animX.stop()
                                     animY.stop()
@@ -377,19 +822,16 @@ fun PhotoSwipeScreen(
                                     val absY = offsetY.absoluteValue
                                     val deleteThreshold = 200f
                                     val navThreshold = 200f
-                                    // ~1200 px/s feels like a deliberate fling on phone screens
                                     val flingVelocityX = 1200f
                                     val lock = axisLock
 
                                     when {
-                                        // Delete ONLY when locked to HorizontalRight
                                         lock == AxisLock.HorizontalRight &&
                                             (offsetX > deleteThreshold || velocityX > flingVelocityX) &&
                                             offsetX > 0f &&
                                             (absX > absY * 1.5f || absY < 12f) -> {
                                             gestureLocked = true
                                             if (reduceMotion) {
-                                                // Accessibility: no large travel — fade / stage instantly
                                                 alpha.snapTo(0f)
                                                 viewModel.stageCurrentForDelete()
                                                 resetTransforms()
@@ -397,7 +839,6 @@ fun PhotoSwipeScreen(
                                             } else {
                                                 val flingX = with(density) { 1100.dp.toPx() }
                                                 val flingY = with(density) { (-780).dp.toPx() }
-                                                // Project from release velocity toward upper-right off-screen
                                                 val targetX = max(offsetX + velocityX * 0.22f, flingX)
                                                 val targetY = min(offsetY + velocityY * 0.22f, flingY)
                                                 val throwRot = (
@@ -447,7 +888,6 @@ fun PhotoSwipeScreen(
                                             }
                                         }
 
-                                        // Next/prev ONLY when locked to Vertical
                                         lock == AxisLock.Vertical &&
                                             offsetY < -navThreshold -> {
                                             gestureLocked = true
@@ -500,8 +940,6 @@ fun PhotoSwipeScreen(
                                             gestureLocked = false
                                         }
 
-                                        // Snap back (HorizontalLeft, None, or incomplete gestures)
-                                        // Not locked: a new drag can interrupt mid-spring.
                                         else -> {
                                             snapBack(velocityX, velocityY)
                                         }
@@ -521,14 +959,12 @@ fun PhotoSwipeScreen(
                                 gestureDx += dragAmount.x
                                 gestureDy += dragAmount.y
 
-                                // Decide axis once travel exceeds lock slop
                                 if (axisLock == AxisLock.None) {
                                     val absDx = gestureDx.absoluteValue
                                     val absDy = gestureDy.absoluteValue
                                     val travel = hypot(gestureDx, gestureDy)
                                     if (travel >= lockSlopPx || max(absDx, absDy) >= lockSlopPx) {
                                         axisLock = when {
-                                            // Prefer vertical on near-ties so up-swipes win
                                             absDy >= absDx * 1.15f -> AxisLock.Vertical
                                             gestureDx > 0f && absDx > absDy -> AxisLock.HorizontalRight
                                             gestureDx < 0f -> AxisLock.HorizontalLeft
@@ -545,17 +981,14 @@ fun PhotoSwipeScreen(
                                         applyY = dragAmount.y
                                     }
                                     AxisLock.Vertical -> {
-                                        // Strongly damp X; only Y drives next/prev; never stage delete
                                         applyX = dragAmount.x * crossAxisDamp
                                         applyY = dragAmount.y
                                     }
                                     AxisLock.HorizontalRight -> {
-                                        // Strongly damp Y; only +X can delete
                                         applyX = dragAmount.x
                                         applyY = dragAmount.y * crossAxisDamp
                                     }
                                     AxisLock.HorizontalLeft -> {
-                                        // Damp Y; snap-back only on release (never delete)
                                         applyX = dragAmount.x
                                         applyY = dragAmount.y * crossAxisDamp
                                     }
@@ -565,7 +998,6 @@ fun PhotoSwipeScreen(
                                     animX.snapTo(animX.value + applyX)
                                     animY.snapTo(animY.value + applyY)
 
-                                    // Live tilt only when on delete axis (right) or unlocked rightward
                                     val ox = animX.value
                                     val showDeleteHint =
                                         axisLock == AxisLock.HorizontalRight ||
@@ -579,7 +1011,6 @@ fun PhotoSwipeScreen(
                                     }
                                     rotation.snapTo(targetRotation)
 
-                                    // Gentle live scale (stay ≥ ~0.92); opacity hint on right drag
                                     val hintX = if (showDeleteHint) ox.coerceAtLeast(0f) else 0f
                                     val targetScale =
                                         1f - (hintX / 4000f).coerceIn(0f, 0.08f)
@@ -594,7 +1025,6 @@ fun PhotoSwipeScreen(
                 contentScale = ContentScale.Fit
             )
         } ?: run {
-            // Feed empty but may still have pending deletes
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -602,8 +1032,6 @@ fun PhotoSwipeScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         text = when {
-                            viewModel.pendingCount > 0 ->
-                                "已选 ${viewModel.pendingCount} 张，点击下方确认删除"
                             viewModel.allPhotosSeen -> "已全部浏览完"
                             else -> "暂无照片"
                         },
@@ -612,12 +1040,12 @@ fun PhotoSwipeScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 32.dp)
                     )
-                    if (viewModel.pendingCount == 0 && viewModel.allPhotosSeen) {
+                    if (viewModel.allPhotosSeen) {
                         Button(
                             onClick = { viewModel.clearSeenAndReload(context) },
                             modifier = Modifier.padding(top = 20.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF1E88E5),
+                                containerColor = AccentBlue,
                                 contentColor = Color.White
                             )
                         ) {
@@ -628,22 +1056,21 @@ fun PhotoSwipeScreen(
             }
         }
 
-        // HUD: pending + confirmed today
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 60.dp)
+                .statusBarsPadding()
+                .padding(top = 12.dp)
                 .background(
                     color = Color(0x99000000),
                     shape = RoundedCornerShape(20.dp)
                 )
                 .padding(horizontal = 20.dp, vertical = 10.dp)
         ) {
-            val pending = viewModel.pendingCount
-            val text = if (pending > 0) {
-                "待删 $pending · 今日已删 ${viewModel.deletedToday}"
+            val text = if (viewModel.recycleCount > 0) {
+                "回收站 ${viewModel.recycleCount} · 今日永久 ${viewModel.deletedToday}"
             } else {
-                "今日已删 ${viewModel.deletedToday}"
+                "今日永久 ${viewModel.deletedToday}"
             }
             Text(
                 text = text,
@@ -653,36 +1080,10 @@ fun PhotoSwipeScreen(
             )
         }
 
-        // Floating batch-delete action
-        if (viewModel.pendingCount > 0) {
-            Button(
-                onClick = {
-                    viewModel.requestBatchDelete(context, deleteRequestLauncher)
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 100.dp)
-                    .fillMaxWidth(0.72f),
-                shape = RoundedCornerShape(28.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFE53935),
-                    contentColor = Color.White
-                )
-            ) {
-                Text(
-                    text = "删除 ${viewModel.pendingCount} 张",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(vertical = 4.dp)
-                )
-            }
-        }
-
-        // Bottom hints
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp)
+                .padding(bottom = 16.dp)
                 .fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -693,7 +1094,7 @@ fun PhotoSwipeScreen(
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "右滑标记删除（批量确认）",
+                text = "右滑移入回收站",
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 14.sp
             )
