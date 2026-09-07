@@ -58,6 +58,7 @@ import com.google.accompanist.permissions.shouldShowRationale
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -224,6 +225,14 @@ fun EmptyScreen(
     }
 }
 
+
+private enum class AxisLock {
+    None,
+    Vertical,
+    HorizontalRight,
+    HorizontalLeft
+}
+
 @Composable
 fun PhotoSwipeScreen(
     viewModel: PhotoViewModel,
@@ -241,7 +250,14 @@ fun PhotoSwipeScreen(
     // Only lock during irreversible stage transitions (delete / vertical nav exit),
     // never during snap-back — so a new drag can interrupt and retarget.
     var gestureLocked by remember { mutableStateOf(false) }
+    // Axis lock: prevents diagonal up-swipes from accidentally deleting.
+    var axisLock by remember { mutableStateOf(AxisLock.None) }
+    var gestureDx by remember { mutableStateOf(0f) }
+    var gestureDy by remember { mutableStateOf(0f) }
     val velocityTracker = remember { VelocityTracker() }
+    // ~14dp lock slop — decide axis once finger travels past this.
+    val lockSlopPx = with(density) { 14.dp.toPx() }
+    val crossAxisDamp = 0.08f
 
     val reduceMotion = remember(context) {
         try {
@@ -337,6 +353,9 @@ fun PhotoSwipeScreen(
                         detectDragGestures(
                             onDragStart = {
                                 velocityTracker.resetTracking()
+                                axisLock = AxisLock.None
+                                gestureDx = 0f
+                                gestureDy = 0f
                                 // Interrupt snap-back / soft anims and take over from current values
                                 scope.launch {
                                     animX.stop()
@@ -360,14 +379,14 @@ fun PhotoSwipeScreen(
                                     val navThreshold = 200f
                                     // ~1200 px/s feels like a deliberate fling on phone screens
                                     val flingVelocityX = 1200f
-                                    val towardUpperRight =
-                                        velocityX > flingVelocityX &&
-                                            velocityY < flingVelocityX * 0.45f &&
-                                            offsetX > 48f
+                                    val lock = axisLock
 
                                     when {
-                                        // ONLY right-swipe / upper-right fling deletes
-                                        (offsetX > deleteThreshold && absX > absY) || towardUpperRight -> {
+                                        // Delete ONLY when locked to HorizontalRight
+                                        lock == AxisLock.HorizontalRight &&
+                                            (offsetX > deleteThreshold || velocityX > flingVelocityX) &&
+                                            offsetX > 0f &&
+                                            (absX > absY * 1.5f || absY < 12f) -> {
                                             gestureLocked = true
                                             if (reduceMotion) {
                                                 // Accessibility: no large travel — fade / stage instantly
@@ -428,8 +447,9 @@ fun PhotoSwipeScreen(
                                             }
                                         }
 
-                                        // Swipe UP = next photo
-                                        offsetY < -navThreshold && absY > absX -> {
+                                        // Next/prev ONLY when locked to Vertical
+                                        lock == AxisLock.Vertical &&
+                                            offsetY < -navThreshold -> {
                                             gestureLocked = true
                                             if (reduceMotion) {
                                                 viewModel.moveToNext()
@@ -454,8 +474,8 @@ fun PhotoSwipeScreen(
                                             gestureLocked = false
                                         }
 
-                                        // Swipe DOWN = previous photo
-                                        offsetY > navThreshold && absY > absX -> {
+                                        lock == AxisLock.Vertical &&
+                                            offsetY > navThreshold -> {
                                             gestureLocked = true
                                             if (reduceMotion) {
                                                 viewModel.moveToPrevious()
@@ -480,12 +500,15 @@ fun PhotoSwipeScreen(
                                             gestureLocked = false
                                         }
 
-                                        // Snap back (includes left-swipe — no delete)
+                                        // Snap back (HorizontalLeft, None, or incomplete gestures)
                                         // Not locked: a new drag can interrupt mid-spring.
                                         else -> {
                                             snapBack(velocityX, velocityY)
                                         }
                                     }
+                                    axisLock = AxisLock.None
+                                    gestureDx = 0f
+                                    gestureDy = 0f
                                 }
                             },
                             onDrag = { change, dragAmount ->
@@ -495,25 +518,74 @@ fun PhotoSwipeScreen(
                                     change.uptimeMillis,
                                     change.position
                                 )
-                                scope.launch {
-                                    animX.snapTo(animX.value + dragAmount.x)
-                                    animY.snapTo(animY.value + dragAmount.y)
+                                gestureDx += dragAmount.x
+                                gestureDy += dragAmount.y
 
-                                    // Live tilt only when dragging right (delete hint)
+                                // Decide axis once travel exceeds lock slop
+                                if (axisLock == AxisLock.None) {
+                                    val absDx = gestureDx.absoluteValue
+                                    val absDy = gestureDy.absoluteValue
+                                    val travel = hypot(gestureDx, gestureDy)
+                                    if (travel >= lockSlopPx || max(absDx, absDy) >= lockSlopPx) {
+                                        axisLock = when {
+                                            // Prefer vertical on near-ties so up-swipes win
+                                            absDy >= absDx * 1.15f -> AxisLock.Vertical
+                                            gestureDx > 0f && absDx > absDy -> AxisLock.HorizontalRight
+                                            gestureDx < 0f -> AxisLock.HorizontalLeft
+                                            else -> AxisLock.Vertical
+                                        }
+                                    }
+                                }
+
+                                val applyX: Float
+                                val applyY: Float
+                                when (axisLock) {
+                                    AxisLock.None -> {
+                                        applyX = dragAmount.x
+                                        applyY = dragAmount.y
+                                    }
+                                    AxisLock.Vertical -> {
+                                        // Strongly damp X; only Y drives next/prev; never stage delete
+                                        applyX = dragAmount.x * crossAxisDamp
+                                        applyY = dragAmount.y
+                                    }
+                                    AxisLock.HorizontalRight -> {
+                                        // Strongly damp Y; only +X can delete
+                                        applyX = dragAmount.x
+                                        applyY = dragAmount.y * crossAxisDamp
+                                    }
+                                    AxisLock.HorizontalLeft -> {
+                                        // Damp Y; snap-back only on release (never delete)
+                                        applyX = dragAmount.x
+                                        applyY = dragAmount.y * crossAxisDamp
+                                    }
+                                }
+
+                                scope.launch {
+                                    animX.snapTo(animX.value + applyX)
+                                    animY.snapTo(animY.value + applyY)
+
+                                    // Live tilt only when on delete axis (right) or unlocked rightward
                                     val ox = animX.value
-                                    val targetRotation = if (ox > 0) {
-                                        (ox / 18f).coerceIn(0f, 28f)
-                                    } else {
-                                        (ox / 40f).coerceIn(-8f, 0f)
+                                    val showDeleteHint =
+                                        axisLock == AxisLock.HorizontalRight ||
+                                            (axisLock == AxisLock.None && ox > 0f)
+                                    val targetRotation = when {
+                                        showDeleteHint && ox > 0f ->
+                                            (ox / 18f).coerceIn(0f, 28f)
+                                        ox < 0f ->
+                                            (ox / 40f).coerceIn(-8f, 0f)
+                                        else -> 0f
                                     }
                                     rotation.snapTo(targetRotation)
 
                                     // Gentle live scale (stay ≥ ~0.92); opacity hint on right drag
+                                    val hintX = if (showDeleteHint) ox.coerceAtLeast(0f) else 0f
                                     val targetScale =
-                                        1f - (ox.coerceAtLeast(0f) / 4000f).coerceIn(0f, 0.08f)
+                                        1f - (hintX / 4000f).coerceIn(0f, 0.08f)
                                     scale.snapTo(targetScale)
                                     val targetAlpha =
-                                        1f - (ox.coerceAtLeast(0f) / 1800f).coerceIn(0f, 0.18f)
+                                        1f - (hintX / 1800f).coerceIn(0f, 0.18f)
                                     alpha.snapTo(targetAlpha)
                                 }
                             }
