@@ -33,6 +33,8 @@ class PhotoViewModel : ViewModel() {
     private val _pendingDelete = mutableStateListOf<Photo>()
     val pendingDelete: List<Photo> = _pendingDelete
 
+    private var seenStore: SeenPhotosStore? = null
+
     var currentIndex by mutableIntStateOf(0)
         private set
 
@@ -49,17 +51,36 @@ class PhotoViewModel : ViewModel() {
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * True when the library has photos but every one is already in the seen set,
+     * so the active feed is empty and the user may want 「重新浏览」.
+     */
+    var allPhotosSeen by mutableStateOf(false)
+        private set
+
+    /** Total images in MediaStore before filtering seen IDs. */
+    var libraryCount by mutableIntStateOf(0)
+        private set
+
     fun loadPhotos(context: Context) {
+        if (seenStore == null) {
+            seenStore = SeenPhotosStore(context)
+        }
         viewModelScope.launch {
             isLoading = true
             errorMessage = null
 
             try {
+                val store = seenStore!!
+                val seenIds = store.getSeenIds()
                 val photoList = withContext(Dispatchers.IO) {
                     queryPhotos(context.contentResolver)
                 }
+                libraryCount = photoList.size
+                val filtered = photoList.filter { it.id !in seenIds }
+                allPhotosSeen = photoList.isNotEmpty() && filtered.isEmpty()
                 _photos.clear()
-                _photos.addAll(photoList)
+                _photos.addAll(filtered)
                 _pendingDelete.clear()
                 currentIndex = 0
             } catch (e: Exception) {
@@ -68,6 +89,21 @@ class PhotoViewModel : ViewModel() {
                 isLoading = false
             }
         }
+    }
+
+    /** Clears seen set and reloads the full library into the feed. */
+    fun clearSeenAndReload(context: Context) {
+        if (seenStore == null) {
+            seenStore = SeenPhotosStore(context)
+        }
+        seenStore?.clear()
+        allPhotosSeen = false
+        loadPhotos(context)
+    }
+
+    private fun markCurrentSeen() {
+        val photo = getCurrentPhoto() ?: return
+        seenStore?.markSeen(photo.id)
     }
 
     private fun queryPhotos(contentResolver: ContentResolver): List<Photo> {
@@ -108,9 +144,16 @@ class PhotoViewModel : ViewModel() {
         return photoList
     }
 
+    /** Swipe UP: mark current as seen, then advance. */
     fun moveToNext() {
         if (currentIndex < _photos.size - 1) {
+            markCurrentSeen()
             currentIndex++
+        } else if (currentIndex == _photos.size - 1 && _photos.isNotEmpty()) {
+            // Last photo: still mark seen so it won't return on restart.
+            markCurrentSeen()
+            // Stay on last index; feed may look "done" but pending delete can remain.
+            // Optionally remove from active consideration — keep in list for swipe-down.
         }
     }
 
@@ -122,11 +165,14 @@ class PhotoViewModel : ViewModel() {
 
     /**
      * Stage current photo for batch delete: remove from feed visually, do NOT call MediaStore yet.
+     * Also mark as seen so it does not reappear if the user force-stops before confirming.
      */
     fun stageCurrentForDelete() {
         if (_photos.isEmpty() || currentIndex !in _photos.indices) return
 
-        val photo = _photos.removeAt(currentIndex)
+        val photo = _photos[currentIndex]
+        seenStore?.markSeen(photo.id)
+        _photos.removeAt(currentIndex)
         _pendingDelete.add(photo)
 
         // Keep showing the photo that slid into this index; clamp if we removed the last one.
@@ -135,6 +181,10 @@ class PhotoViewModel : ViewModel() {
         }
         if (_photos.isEmpty()) {
             currentIndex = 0
+            // If library had only these (now pending/seen), surface escape hatch after confirm.
+            if (libraryCount > 0 && pendingCount == 0) {
+                allPhotosSeen = true
+            }
         }
     }
 
@@ -180,6 +230,11 @@ class PhotoViewModel : ViewModel() {
     fun onBatchDeleteConfirmed(count: Int = _pendingDelete.size) {
         deletedToday += count.coerceAtLeast(0)
         _pendingDelete.clear()
+        if (_photos.isEmpty() && libraryCount > 0) {
+            // Remaining library entries are seen (or deleted); offer rebrowse if any remain on disk.
+            // libraryCount still reflects pre-delete snapshot; refresh flag conservatively.
+            allPhotosSeen = true
+        }
     }
 
     /** Call when user cancels system delete UI — restore staged items into the feed. */
@@ -190,6 +245,7 @@ class PhotoViewModel : ViewModel() {
         _pendingDelete.clear()
         _photos.addAll(0, restored)
         currentIndex = 0
+        allPhotosSeen = false
     }
 
     fun getCurrentPhoto(): Photo? {

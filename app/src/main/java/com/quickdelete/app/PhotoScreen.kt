@@ -75,6 +75,8 @@ fun PhotoScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             viewModel.onBatchDeleteConfirmed()
+            // Recompute feed vs seen set after MediaStore delete.
+            viewModel.loadPhotos(context)
         } else {
             viewModel.onBatchDeleteCancelled()
         }
@@ -110,7 +112,10 @@ fun PhotoScreen(
             }
 
             viewModel.photos.isEmpty() && viewModel.pendingCount == 0 -> {
-                EmptyScreen()
+                EmptyScreen(
+                    allPhotosSeen = viewModel.allPhotosSeen,
+                    onRebrowse = { viewModel.clearSeenAndReload(context) }
+                )
             }
 
             else -> {
@@ -170,16 +175,44 @@ fun LoadingScreen() {
 }
 
 @Composable
-fun EmptyScreen() {
+fun EmptyScreen(
+    allPhotosSeen: Boolean = false,
+    onRebrowse: (() -> Unit)? = null
+) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = "暂无照片",
-            color = Color.White,
-            fontSize = 18.sp
-        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Text(
+                text = if (allPhotosSeen) "已全部浏览完" else "暂无照片",
+                color = Color.White,
+                fontSize = 18.sp,
+                textAlign = TextAlign.Center
+            )
+            if (allPhotosSeen) {
+                Text(
+                    text = "相册里还有已看过的照片",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Button(
+                    onClick = { onRebrowse?.invoke() },
+                    modifier = Modifier.padding(top = 20.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF1E88E5),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("重新浏览")
+                }
+            }
+        }
     }
 }
 
@@ -342,17 +375,32 @@ fun PhotoSwipeScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = if (viewModel.pendingCount > 0) {
-                        "已选 ${viewModel.pendingCount} 张，点击下方确认删除"
-                    } else {
-                        "暂无照片"
-                    },
-                    color = Color.White,
-                    fontSize = 16.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(32.dp)
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = when {
+                            viewModel.pendingCount > 0 ->
+                                "已选 ${viewModel.pendingCount} 张，点击下方确认删除"
+                            viewModel.allPhotosSeen -> "已全部浏览完"
+                            else -> "暂无照片"
+                        },
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    )
+                    if (viewModel.pendingCount == 0 && viewModel.allPhotosSeen) {
+                        Button(
+                            onClick = { viewModel.clearSeenAndReload(context) },
+                            modifier = Modifier.padding(top = 20.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1E88E5),
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text("重新浏览")
+                        }
+                    }
+                }
             }
         }
 
