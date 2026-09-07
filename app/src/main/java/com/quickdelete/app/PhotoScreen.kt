@@ -5,7 +5,11 @@ import android.app.Activity
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.Settings
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -34,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -50,8 +55,11 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.google.accompanist.permissions.shouldShowRationale
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -222,14 +230,43 @@ fun PhotoSwipeScreen(
     deleteRequestLauncher: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.IntentSenderRequest>
 ) {
     val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
     val animX = remember { Animatable(0f) }
     val animY = remember { Animatable(0f) }
     val scale = remember { Animatable(1f) }
     val rotation = remember { Animatable(0f) }
+    val alpha = remember { Animatable(1f) }
+    // Only lock during irreversible stage transitions (delete / vertical nav exit),
+    // never during snap-back — so a new drag can interrupt and retarget.
     var gestureLocked by remember { mutableStateOf(false) }
+    val velocityTracker = remember { VelocityTracker() }
+
+    val reduceMotion = remember(context) {
+        try {
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f
+            ) == 0f
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    val snapSpring = remember {
+        spring<Float>(
+            dampingRatio = 1f, // critically damped — no bounce on cancel
+            stiffness = Spring.StiffnessMedium
+        )
+    }
+    val throwSpring = remember {
+        spring<Float>(
+            dampingRatio = 0.86f,
+            stiffness = 280f
+        )
+    }
 
     val currentPhoto = viewModel.getCurrentPhoto()
     val nextPhoto = viewModel.getNextPhoto()
@@ -243,6 +280,34 @@ fun PhotoSwipeScreen(
                 .build()
             imageLoader.enqueue(request)
             onDispose { }
+        }
+    }
+
+    suspend fun resetTransforms() {
+        animX.snapTo(0f)
+        animY.snapTo(0f)
+        scale.snapTo(1f)
+        rotation.snapTo(0f)
+        alpha.snapTo(1f)
+    }
+
+    suspend fun snapBack(velocityX: Float, velocityY: Float) {
+        coroutineScope {
+            launch {
+                animX.animateTo(0f, animationSpec = snapSpring, initialVelocity = velocityX)
+            }
+            launch {
+                animY.animateTo(0f, animationSpec = snapSpring, initialVelocity = velocityY)
+            }
+            launch {
+                scale.animateTo(1f, animationSpec = snapSpring)
+            }
+            launch {
+                rotation.animateTo(0f, animationSpec = snapSpring)
+            }
+            launch {
+                alpha.animateTo(1f, animationSpec = snapSpring)
+            }
         }
     }
 
@@ -264,82 +329,161 @@ fun PhotoSwipeScreen(
                     .graphicsLayer(
                         scaleX = scale.value,
                         scaleY = scale.value,
-                        rotationZ = rotation.value
+                        rotationZ = rotation.value,
+                        alpha = alpha.value
                     )
-                    .pointerInput(gestureLocked, photo.uri) {
+                    .pointerInput(gestureLocked, photo.uri, reduceMotion) {
                         if (gestureLocked) return@pointerInput
                         detectDragGestures(
+                            onDragStart = {
+                                velocityTracker.resetTracking()
+                                // Interrupt snap-back / soft anims and take over from current values
+                                scope.launch {
+                                    animX.stop()
+                                    animY.stop()
+                                    scale.stop()
+                                    rotation.stop()
+                                    alpha.stop()
+                                }
+                            },
                             onDragEnd = {
-                                coroutineScope.launch {
+                                scope.launch {
                                     if (gestureLocked) return@launch
+                                    val velocity = velocityTracker.calculateVelocity()
+                                    val velocityX = velocity.x
+                                    val velocityY = velocity.y
                                     val offsetX = animX.value
                                     val offsetY = animY.value
                                     val absX = offsetX.absoluteValue
                                     val absY = offsetY.absoluteValue
                                     val deleteThreshold = 200f
                                     val navThreshold = 200f
+                                    // ~1200 px/s feels like a deliberate fling on phone screens
+                                    val flingVelocityX = 1200f
+                                    val towardUpperRight =
+                                        velocityX > flingVelocityX &&
+                                            velocityY < flingVelocityX * 0.45f &&
+                                            offsetX > 48f
 
                                     when {
-                                        // ONLY right-swipe deletes
-                                        offsetX > deleteThreshold && absX > absY -> {
+                                        // ONLY right-swipe / upper-right fling deletes
+                                        (offsetX > deleteThreshold && absX > absY) || towardUpperRight -> {
                                             gestureLocked = true
-                                            val flingX = with(density) { 900.dp.toPx() }
-                                            val flingY = with(density) { (-700).dp.toPx() }
-                                            // Throw upper-right with "扔出去" feel
-                                            launch {
-                                                animX.animateTo(flingX, tween(280))
+                                            if (reduceMotion) {
+                                                // Accessibility: no large travel — fade / stage instantly
+                                                alpha.snapTo(0f)
+                                                viewModel.stageCurrentForDelete()
+                                                resetTransforms()
+                                                gestureLocked = false
+                                            } else {
+                                                val flingX = with(density) { 1100.dp.toPx() }
+                                                val flingY = with(density) { (-780).dp.toPx() }
+                                                // Project from release velocity toward upper-right off-screen
+                                                val targetX = max(offsetX + velocityX * 0.22f, flingX)
+                                                val targetY = min(offsetY + velocityY * 0.22f, flingY)
+                                                val throwRot = (
+                                                    rotation.value +
+                                                        (velocityX / 3200f).coerceIn(0f, 10f)
+                                                    ).coerceIn(0f, 32f)
+                                                val throwScale = 0.90f
+
+                                                coroutineScope {
+                                                    launch {
+                                                        animX.animateTo(
+                                                            targetX,
+                                                            animationSpec = throwSpring,
+                                                            initialVelocity = velocityX
+                                                        )
+                                                    }
+                                                    launch {
+                                                        animY.animateTo(
+                                                            targetY,
+                                                            animationSpec = throwSpring,
+                                                            initialVelocity = velocityY
+                                                        )
+                                                    }
+                                                    launch {
+                                                        rotation.animateTo(
+                                                            throwRot,
+                                                            animationSpec = throwSpring,
+                                                            initialVelocity = velocityX / 80f
+                                                        )
+                                                    }
+                                                    launch {
+                                                        scale.animateTo(
+                                                            throwScale,
+                                                            animationSpec = throwSpring
+                                                        )
+                                                    }
+                                                    launch {
+                                                        alpha.animateTo(
+                                                            0f,
+                                                            animationSpec = throwSpring
+                                                        )
+                                                    }
+                                                }
+                                                viewModel.stageCurrentForDelete()
+                                                resetTransforms()
+                                                gestureLocked = false
                                             }
-                                            launch {
-                                                animY.animateTo(flingY, tween(280))
-                                            }
-                                            launch {
-                                                rotation.animateTo(38f, tween(280))
-                                            }
-                                            launch {
-                                                scale.animateTo(0.55f, tween(280))
-                                            }
-                                            // Wait for fling roughly
-                                            kotlinx.coroutines.delay(260)
-                                            viewModel.stageCurrentForDelete()
-                                            animX.snapTo(0f)
-                                            animY.snapTo(0f)
-                                            scale.snapTo(1f)
-                                            rotation.snapTo(0f)
-                                            gestureLocked = false
                                         }
 
                                         // Swipe UP = next photo
                                         offsetY < -navThreshold && absY > absX -> {
                                             gestureLocked = true
-                                            val exitY = with(density) { (-1200).dp.toPx() }
-                                            animY.animateTo(exitY, tween(200))
-                                            viewModel.moveToNext()
-                                            animX.snapTo(0f)
-                                            animY.snapTo(0f)
-                                            scale.snapTo(1f)
-                                            rotation.snapTo(0f)
+                                            if (reduceMotion) {
+                                                viewModel.moveToNext()
+                                                resetTransforms()
+                                            } else {
+                                                val exitY = with(density) { (-900).dp.toPx() }
+                                                val projected = min(
+                                                    offsetY + velocityY * 0.12f,
+                                                    exitY
+                                                )
+                                                animY.animateTo(
+                                                    projected,
+                                                    animationSpec = tween(
+                                                        durationMillis = 160,
+                                                        easing = FastOutSlowInEasing
+                                                    ),
+                                                    initialVelocity = velocityY
+                                                )
+                                                viewModel.moveToNext()
+                                                resetTransforms()
+                                            }
                                             gestureLocked = false
                                         }
 
                                         // Swipe DOWN = previous photo
                                         offsetY > navThreshold && absY > absX -> {
                                             gestureLocked = true
-                                            val exitY = with(density) { 1200.dp.toPx() }
-                                            animY.animateTo(exitY, tween(200))
-                                            viewModel.moveToPrevious()
-                                            animX.snapTo(0f)
-                                            animY.snapTo(0f)
-                                            scale.snapTo(1f)
-                                            rotation.snapTo(0f)
+                                            if (reduceMotion) {
+                                                viewModel.moveToPrevious()
+                                                resetTransforms()
+                                            } else {
+                                                val exitY = with(density) { 900.dp.toPx() }
+                                                val projected = max(
+                                                    offsetY + velocityY * 0.12f,
+                                                    exitY
+                                                )
+                                                animY.animateTo(
+                                                    projected,
+                                                    animationSpec = tween(
+                                                        durationMillis = 160,
+                                                        easing = FastOutSlowInEasing
+                                                    ),
+                                                    initialVelocity = velocityY
+                                                )
+                                                viewModel.moveToPrevious()
+                                                resetTransforms()
+                                            }
                                             gestureLocked = false
                                         }
 
                                         // Snap back (includes left-swipe — no delete)
+                                        // Not locked: a new drag can interrupt mid-spring.
                                         else -> {
-                                            launch { animX.animateTo(0f, tween(200)) }
-                                            launch { animY.animateTo(0f, tween(200)) }
-                                            launch { scale.animateTo(1f, tween(200)) }
-                                            launch { rotation.animateTo(0f, tween(200)) }
+                                            snapBack(velocityX, velocityY)
                                         }
                                     }
                                 }
@@ -347,7 +491,11 @@ fun PhotoSwipeScreen(
                             onDrag = { change, dragAmount ->
                                 if (gestureLocked) return@detectDragGestures
                                 change.consume()
-                                coroutineScope.launch {
+                                velocityTracker.addPosition(
+                                    change.uptimeMillis,
+                                    change.position
+                                )
+                                scope.launch {
                                     animX.snapTo(animX.value + dragAmount.x)
                                     animY.snapTo(animY.value + dragAmount.y)
 
@@ -360,9 +508,13 @@ fun PhotoSwipeScreen(
                                     }
                                     rotation.snapTo(targetRotation)
 
+                                    // Gentle live scale (stay ≥ ~0.92); opacity hint on right drag
                                     val targetScale =
-                                        1f - (ox.coerceAtLeast(0f) / 2200f).coerceIn(0f, 0.18f)
+                                        1f - (ox.coerceAtLeast(0f) / 4000f).coerceIn(0f, 0.08f)
                                     scale.snapTo(targetScale)
+                                    val targetAlpha =
+                                        1f - (ox.coerceAtLeast(0f) / 1800f).coerceIn(0f, 0.18f)
+                                    alpha.snapTo(targetAlpha)
                                 }
                             }
                         )
