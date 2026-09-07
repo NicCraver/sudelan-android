@@ -76,3 +76,19 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
+
+// After assembleDebug, copy APK as 速删-{versionName}-debug.apk
+val debugApkVersionName: String = android.defaultConfig.versionName ?: "0.0.0"
+
+tasks.register<Copy>("packageVersionedDebugApk") {
+    from(layout.buildDirectory.dir("outputs/apk/debug"))
+    include("*.apk")
+    into(rootProject.layout.projectDirectory.dir("dist"))
+    rename { "速删-${debugApkVersionName}-debug.apk" }
+}
+
+afterEvaluate {
+    tasks.named("assembleDebug").configure {
+        finalizedBy("packageVersionedDebugApk")
+    }
+}

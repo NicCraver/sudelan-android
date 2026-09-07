@@ -150,3 +150,7 @@ app/src/main/
 ---
 
 **注意**: 这是一个 Debug 版本，仅供测试使用。正式发布版本需要进行代码签名和优化。
+
+## APK 命名
+
+Debug 包输出为 `dist/速删-{versionName}-debug.apk`（例如 `速删-0.1.4-debug.apk`）。GitHub Release 资源请使用同名文件，不要再用固定的 `quick-delete-debug.apk`。
